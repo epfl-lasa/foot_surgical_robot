@@ -11,26 +11,19 @@
 #include "geometry_msgs/Twist.h"
 #include "geometry_msgs/Quaternion.h"
 
-#include <kdl/jntarray.hpp>
-#include <kdl/framevel.hpp>
-#include <tf/LinearMath/Matrix3x3.h>
-#include <tf/LinearMath/Vector3.h>
 #include <dynamic_reconfigure/server.h>
+
+#include "foot_surgical_robot/footIsometricController_paramsConfig.h"
 
 #include "geometry_msgs/PointStamped.h"
 #include <rosserial_mbed/Adc.h>
 
-
-// Max cursor value of the foot mouse
-// #define MAX_XY_REL 127
-#define MAX_XY_REL 350
-#define MAX_FRAME 200
-
+#define MAX_ADC_VALUE 36000
+#define ADC_THRESHOLD 3000
 
 class FootIsometricController 
 {
-
-	protected:
+	private:
 
 		// ROS variables
 		ros::NodeHandle _n;
@@ -44,48 +37,43 @@ class FootIsometricController
 		ros::Publisher _pubDesiredOrientation;  // Publish desired orientation
 
 		// Subsciber and publisher messages declaration
-		rosserial_mbed::Adc _msgFootIsometric;
 		geometry_msgs::Pose _msgRealPose;
 		geometry_msgs::Quaternion _msgDesiredOrientation;
 		geometry_msgs::Twist _msgDesiredTwist;
 
+		// State and controller variables variables
+		Eigen::Matrix3f _wRb;				    // Current rotation matrix (3x3)
+		Eigen::Vector3f _pcur;				  // Current position [m] (3x1)
+		Eigen::Vector3f _pdes;				  // Desired position [m] (3x1)
+		Eigen::Vector3f _vdes;				  // Desired velocity [m/s] (3x1)
+		Eigen::Vector3f _omegades;		  // Desired angular velocity [rad/s] (3x1)
+		Eigen::Vector4f _qcur;				  // Current end effector quaternion (4x1)
+		Eigen::Vector4f _qdes;				  // Desired end effector quaternion (4x1)
+		Eigen::Matrix<float,7,1> _adc;  // ADC data (shifted) coming from the foot isometric interface
 
-		// State variables
-		bool _firstRealPoseReceived;	// Monitor the first robot pose update
-		bool _firstFootIsometricReceived;			// Monitor the first foot mouse event update
-		uint8_t _lastEvent;						// Last foot mouse event
-		bool _firstButton;						// Monitor first button A/B pressed
-		bool _buttonPressed;					// Monitor button A/B pressed
+		// Booleans for checking subscribers
+		bool _firstRealPoseReceived;					// Monitor the first robot pose update
+		bool _firstFootIsometricReceived;			// Monitor the first foot isometric data update
 
-		// Foot mouse control variables
-		Eigen::Matrix3f _wRb;				// Current rotation matrix [m] (3x1)
-		Eigen::Vector3f _pcur;				// Current position [m] (3x1)
-		Eigen::Vector3f _pdes;				// Desired position [m] (3x1)
-		Eigen::Vector3f _vdes;				// Desired velocity [m/s] (3x1)
-		Eigen::Vector3f _omegades;		// Desired angular velocity [rad/s] (3x1)
-		Eigen::Vector4f _qcur;				// Current end effector quaternion (4x1)
-		Eigen::Vector4f _qdes;				// Desired end effector quaternion (4x1)
-
-
-		// Foot mouse controller configuration variables
+		// Foot isometric controller configuration variables
 		float _convergenceRate;				// Convergence rate of the DS
 		float _zVelocity;							// Velocity along Z axis [m/s]
 		float _linearVelocityLimit;		// Linear velocity limit [m/s]
 		float _angularVelocityLimit;  // Angular velocity limit [rad/s]
-		bool _modeThreeTranslation;		// Control mode (true: X,Y,Z translations / false: roll,pitch rotations + insertion,withdraw)
+		bool _threeTranslationMode;		// Control mode (true: X,Y,Z translations / false: roll,pitch rotations + insertion,withdraw)
 
 		// Dynamic reconfigure (server+callback)
-		// dynamic_reconfigure::Server<foot_interfaces::footMouseController_paramsConfig> _dynRecServer;
-		// dynamic_reconfigure::Server<foot_interfaces::footMouseController_paramsConfig>::CallbackType _dynRecCallback;
+		dynamic_reconfigure::Server<foot_surgical_robot::footIsometricController_paramsConfig> _dynRecServer;
+		dynamic_reconfigure::Server<foot_surgical_robot::footIsometricController_paramsConfig>::CallbackType _dynRecCallback;
 
-		// Class variables
+		// Mutex variable
 		std::mutex _mutex;
 
-    	int _count;
+		// Pointer on the instance
+  	static FootIsometricController* me;
 
-    	static FootIsometricController* me;
-
-    	bool _stop = false;
+  	// Control the end of the program
+  	bool _stop = false;
 		
 	public:
 
@@ -98,14 +86,9 @@ class FootIsometricController
 		// Run node main loop
 		void run();
 
-	protected:
-
-		// Compute quaternion product
-		Eigen::Vector4f quaternionProduct(Eigen::Vector4f q1, Eigen::Vector4f q2);
+	private:
 
 		static void stopNode(int sig);
-	
-	private:
 
 		// Callback to update real robot pose
 		void updateRealPose(const geometry_msgs::Pose::ConstPtr& msg);
@@ -114,37 +97,25 @@ class FootIsometricController
 		void updateFootIsometricData(const rosserial_mbed::Adc::ConstPtr& msg);
 
 		// Publish data to topics
-		virtual void publishData();
+		void publishData();
 
-		// // Process button A/B event of the foot mouse
-		// virtual void processABButtonEvent(int value, bool newEvent, int direction);
+		// Compute command to be sent to passive ds controller
+		void computeCommand();
 
-		// // Process button wheel event of the foot mouse
-		// void processWheelEvent(int value, bool newEvent);
+		// Compute quaternion product
+		Eigen::Vector4f quaternionProduct(Eigen::Vector4f q1, Eigen::Vector4f q2);
 
-		// // Process cursor event of the foot mouse
-		// virtual void processCursorEvent(float relX, float relY, bool newEvent);
-
-		// virtual void processRightClickEvent(int value, bool newEvent);
-
-		// Compute command to be send to robot controller
-		virtual void computeCommand();
-
-		// void callback(foot_interfaces::footMouseController_paramsConfig &config, uint32_t level);
-		// Dynamic reconfigure callback
-		// virtual void dynamicReconfigureCallback(foot_interfaces::footMouseController_paramsConfig &config, uint32_t level);
+		// Convert rotation matrix to quaternion
 		Eigen::Vector4f rotationMatrixToQuaternion(Eigen::Matrix3f R);
 
+		// Convert quaternion to rotation matrix
 		Eigen::Matrix3f quaternionToRotationMatrix(Eigen::Vector4f q);
 
+		// Convert quaternion to axis angle
 		void quaternionToAxisAngle(Eigen::Vector4f q, Eigen::Vector3f &axis, float &angle);
 
-    
-
-	    bool _start;
-	    bool _rightClick;
-    
-
+		// Dynamic reconfigure callback
+		void dynamicReconfigureCallback(foot_surgical_robot::footIsometricController_paramsConfig &config, uint32_t level);
 };
 
 

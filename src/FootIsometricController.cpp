@@ -19,19 +19,13 @@ bool FootIsometricController::init()
 	// Variables initializarion
 	_firstRealPoseReceived = false;
 	_firstFootIsometricReceived = false;
-	_firstButton = false;
-	_buttonPressed = false;
-
-	// Init control variables
 	_pcur.setConstant(0.0f);
 	_pdes.setConstant(0.0f);
 	_vdes.setConstant(0.0f);
 	_omegades.setConstant(0.0f);
 	_qcur.setConstant(0.0f);
 	_qdes.setConstant(0.0f);
-
-	_rightClick = false;
-	_count = 0;
+	_adc.setConstant(0.0f);
 	
 	// Subscriber definitions
 	_subRealPose = _n.subscribe("/lwr/ee_pose", 1, &FootIsometricController::updateRealPose, this, ros::TransportHints().reliable().tcpNoDelay());
@@ -41,6 +35,12 @@ bool FootIsometricController::init()
 	_pubDesiredTwist = _n.advertise<geometry_msgs::Twist>("/lwr/joint_controllers/passive_ds_command_vel", 1);
 	_pubDesiredOrientation = _n.advertise<geometry_msgs::Quaternion>("/lwr/joint_controllers/passive_ds_command_orient", 1);
 	
+
+		// Dynamic reconfigure definition
+	_dynRecCallback = boost::bind(&FootIsometricController::dynamicReconfigureCallback, this, _1, _2);
+	_dynRecServer.setCallback(_dynRecCallback);
+
+	// Allows to catch CTRL+C
 	signal(SIGINT,FootIsometricController::stopNode);
 
 
@@ -62,6 +62,7 @@ void FootIsometricController::run()
 {
 	while (!_stop) 
 	{
+		// Check if we received the robot pose and foot data
 		if(_firstFootIsometricReceived && _firstRealPoseReceived)
 		{
 			// Compute control command
@@ -76,6 +77,7 @@ void FootIsometricController::run()
 		_loopRate.sleep();
 	}
 
+	// Send zero linear and angular velocity to stop the robot
 	_vdes.setConstant(0.0f);
 	_omegades.setConstant(0.0f);
 	_qdes = _qcur;
@@ -87,144 +89,155 @@ void FootIsometricController::run()
   ros::shutdown();
 }
 
+
 void FootIsometricController::stopNode(int sig)
 {
 	me->_stop = true;
 }
 
+
 void  FootIsometricController::computeCommand()
 {
-
-   int zoom=1; //! to interpret the adc1 as motion in Z direction (if zoom = 0 || if zoom =2) or motion in X direction (if zoom =1)
-
-   //processFootData();//! Change to increasing 0...350000
-	if (_msgFootIsometric.adc4>34000 && _msgFootIsometric.adc0>34000)
+	if(_threeTranslationMode)
 	{
-		zoom=0; //! Z-
-	}
-	else if(_msgFootIsometric.adc2>34000 && _msgFootIsometric.adc5>34000)
-	{
-		zoom=2; //! Z+
+	  if(_adc(4) > ADC_THRESHOLD) // zw+
+	  {
+	 		_vdes(2) =_adc(4)*_linearVelocityLimit/MAX_ADC_VALUE; 	
+	 		_pdes(2) = _pcur(2);
+
+	 		std::cerr <<"zw+: " << _vdes(2)  << std::endl;
+		}
+		else if(_adc(2) > ADC_THRESHOLD) // zw-
+		{
+	 		_vdes(2)= -_adc(2)*_linearVelocityLimit/MAX_ADC_VALUE; 
+	 		_pdes(2) = _pcur(2);
+
+	 		std::cerr <<"zw-: " << _vdes(2)  << std::endl;
+		} 
+		else // Track desired z position
+		{
+			_vdes(2) = -_convergenceRate*(_pcur(2)-_pdes(2));
+		}
+
+	  if(_adc(0) > ADC_THRESHOLD) // yw+
+	  { 
+	 		_vdes(1)= _adc(0)*_linearVelocityLimit/MAX_ADC_VALUE; 	
+	 		_pdes(1) = _pcur(1);
+
+	 		std::cerr <<"yw+: " << _vdes(1)  << std::endl;
+		}
+		else if(_adc(5) > ADC_THRESHOLD) // yw-
+		{ 
+	 		_vdes(1)=-_adc(5)*_linearVelocityLimit/MAX_ADC_VALUE; 
+	 		_pdes(1) = _pcur(1);
+
+	 		std::cerr <<"yw-: " << _vdes(1)  << std::endl;
+		}    	
+		else // Track desired y position
+	 	{
+	  	_vdes(0) = -_convergenceRate*(_pcur(0)-_pdes(0));
+	 	}
+
+	  if(_adc(3) > ADC_THRESHOLD) // xw+
+	  { 
+	 		_vdes(0)=_adc(3)*_linearVelocityLimit/MAX_ADC_VALUE; 	
+	 		_pdes(0) = _pcur(0);
+	 		
+	 		std::cerr <<"xw+: " << _vdes(0)  << std::endl;
+		}
+		else if(_adc(6) > ADC_THRESHOLD) // xw-
+		{ 
+	 		_vdes(0)=-_adc(6)*_linearVelocityLimit/MAX_ADC_VALUE; 
+	 		_pdes(0) = _pcur(0);
+
+	 		std::cerr <<"xw-: " << _vdes(0) << std::endl;
+		}    	
+		else // Track desired x position
+	 	{
+	  	_vdes(0) = -_convergenceRate*(_pcur(0)-_pdes(0));
+	 	}
+
 	}
 	else
 	{
-		zoom=1; //! null
+	  if(_adc(4) > ADC_THRESHOLD) // zb-
+	  {
+	 		_vdes = -_adc(4)*_linearVelocityLimit/MAX_ADC_VALUE*_wRb.col(2); 	
+	 		_pdes = _pcur;
+
+	 		std::cerr <<"zb+: " << _vdes.transpose()  << std::endl;
+		}
+		else if(_adc(2) > ADC_THRESHOLD) // zb+
+		{
+	 		_vdes= _adc(2)*_linearVelocityLimit/MAX_ADC_VALUE*_wRb.col(2); 
+	 		_pdes = _pcur;
+
+	 		std::cerr <<"zb-: " << _vdes.transpose()  << std::endl;
+		} 
+		else // Track desired position
+		{
+			_vdes = -_convergenceRate*(_pcur-_pdes);
+		}
+
+		_omegades.setConstant(0.0f);
+	  if(_adc(0) > ADC_THRESHOLD) // roll-
+	  { 
+	 		_omegades(0)= _adc(0)*_angularVelocityLimit/MAX_ADC_VALUE; 	
+	 		std::cerr <<"roll-: " << _omegades(0)  << std::endl;
+		}
+		else if(_adc(5) > ADC_THRESHOLD) // roll+
+		{ 
+	 		_omegades(0)= -_adc(5)*_angularVelocityLimit/MAX_ADC_VALUE; 	
+	 		std::cerr <<"roll+: " << _vdes(1)  << std::endl;
+		}    	
+		else
+	 	{
+	 		_omegades(0) = 0.0f;
+	 	}
+
+	  if(_adc(3) > ADC_THRESHOLD) // pitch+
+	  { 
+	 		_omegades(1)= -_adc(3)*_angularVelocityLimit/MAX_ADC_VALUE; 		 		
+	 		std::cerr <<"pitch+: " << _omegades(1)  << std::endl;
+		}
+		else if(_adc(6) > ADC_THRESHOLD) // pitch-
+		{ 
+	 		_omegades(1)= _adc(6)*_angularVelocityLimit/MAX_ADC_VALUE; 
+
+	 		std::cerr <<"pitch-: " << _omegades(1) << std::endl;
+		}    	
+		else
+	 	{
+	 		_omegades(1) = 0.0f;
+	 	}
+	
+		// Update desired quaternion based on desired angular velocity
+		Eigen::Vector4f q;
+		q = _qdes;
+		Eigen:: Vector4f wq;
+		wq << 0, _wRb.transpose()*_omegades;
+		Eigen::Vector4f dq = quaternionProduct(q,wq);
+		q += 0.5f*_dt*dq;
+		q /= q.norm();
+		_qdes = q;
 	}
 
-
-
-  if (_msgFootIsometric.adc1>19000 && (zoom=1))
-  { //!Left (Y+)
-   		_vdes(1)=(_msgFootIsometric.adc1-19000)*(_linearVelocityLimit/(35000-19000))*-1;//! Change of direction
-   		_pdes(1) = _pcur(1);
-	}
-  else if (_msgFootIsometric.adc1<18000 && (zoom=1))
-  { //! Right (Y-)
- 		_vdes(1)=(_msgFootIsometric.adc1-18000)*(_linearVelocityLimit/(18000))*-1;//! Change of direction
- 		_pdes(1) = _pcur(1);
- 	}
-  else
-  {
-  	_vdes(1) = -_convergenceRate*(_pcur(1)-_pdes(1));
-  }
- 
-	if ((_msgFootIsometric.adc1>19000) &&  (zoom=0))
-	{ //!ZoomIn (Z-)
- 		_vdes(2)=(_msgFootIsometric.adc1-19000)*(_linearVelocityLimit/(35000-19000))*-1;//! Change of direction 
- 		_pdes(2) = _pcur(2);
-
-  }  
-	else if (_msgFootIsometric.adc1<18000 && (zoom=2))
-	{ //! ZoomOut (Z+)
- 		_vdes(2)=(_msgFootIsometric.adc1-18000)*(_linearVelocityLimit/(18000))*-1; //! Change of direction 
- 		_pdes(2) = _pcur(2);
- 	}
- 	else
+ 	// Virtual walls
+ 	if((_pcur(1) < -0.4f && _vdes(1) < 0.0f) || (_pcur(1) > 0.4f && _vdes(1) > 0.0f))
  	{
-  	_vdes(2) = -_convergenceRate*(_pcur(2)-_pdes(2));
+ 		_vdes(1) = 0.0f;
  	}
-
-  if ((1000<_msgFootIsometric.adc3<34000))
-  { //! Up(X+)
- 		_vdes(0)=(_msgFootIsometric.adc3)*(_linearVelocityLimit/(34000)); 		
- 		_pdes(0) = _pcur(0);
-	}
-	else if ((1000<_msgFootIsometric.adc6<34000))
-	{ //! Down (X-)
- 		_vdes(0)=-(_msgFootIsometric.adc6)*(_linearVelocityLimit/(34000)); 
- 		_pdes(0) = _pcur(0);
-	}    	
-	else
+ 	if((_pcur(0) < -0.6f && _vdes(0) < 0.0f) || (_pcur(0) > 0.0f && _vdes(0) > 0.0f))
  	{
-  	_vdes(0) = -_convergenceRate*(_pcur(0)-_pdes(0));
+ 		_vdes(0) = 0.0f;
+ 	}
+ 	if((_pcur(2) < 0.35 && _vdes(2) < 0.0f) || (_pcur(2) > 0.7f && _vdes(2) > 0.0f))
+ 	{
+ 		_vdes(2) = 0.0f;
  	}
 
-	//processFootData();
-	// uint8_t event;
-	// int buttonState, relX, relY, relWheel;
-	// float filteredRelX = 0.0f, filteredRelY = 0.0f;
-	// bool newEvent = false;
-
-	// // If new event received update last event
-	// // Otherwhise keep the last one
-	// if(_msgFootMouse.event > 0)
-	// {
-	// 	_lastEvent = _msgFootMouse.event;
-	// 	buttonState = _msgFootMouse.buttonState;
-	// 	relX = _msgFootMouse.relX;
-	// 	relY = _msgFootMouse.relY;
-	// 	relWheel = _msgFootMouse.relWheel;
-	// 	filteredRelX = _msgFootMouse.filteredRelX;
-	// 	filteredRelY = _msgFootMouse.filteredRelY;
-	// 	newEvent = true;
-	// }
-	// else
-	// {
-	// 	buttonState = 0;
-	// 	relX = 0;
-	// 	relY = 0;
-	// 	relWheel = 0;
-	// 	filteredRelX = 0;
-	// 	filteredRelY = 0;
-	// 	newEvent = false;
-	// }
-
-	// event = _lastEvent;
-
-	// // Process corresponding event
-	// switch(event)
-	// {
-	// 	case foot_interfaces::FootMouseMsg::FM_BTN_A:
-	// 	{
-	// 		processABButtonEvent(buttonState,newEvent,-1.0f);
-	// 		break;
-	// 	}
-	// 	case foot_interfaces::FootMouseMsg::FM_BTN_B:
-	// 	{
-	// 		processABButtonEvent(buttonState,newEvent,1.0f);
-	// 		break;
-	// 	}
-	// 	case foot_interfaces::FootMouseMsg::FM_RIGHT_CLICK:
-	// 	{
-	// 		processRightClickEvent(buttonState,newEvent);
-	// 		break;
-	// 	}
-	// 	case foot_interfaces::FootMouseMsg::FM_CURSOR:
-	// 	{
-	// 		processCursorEvent(filteredRelX,filteredRelY,newEvent);
-	// 		break;
-	// 	}
-	// 	default:
-	// 	{
-	// 		break;
-	// 	}
-	// }
 }
 
-// void FootIsometricController::processFootData()
-// {
-
-// }
 
 void FootIsometricController::publishData()
 {
@@ -260,7 +273,7 @@ void FootIsometricController::updateRealPose(const geometry_msgs::Pose::ConstPtr
 	// Update end effecotr pose (position+orientation)
 	_pcur << _msgRealPose.position.x, _msgRealPose.position.y, _msgRealPose.position.z;
 	_qcur << _msgRealPose.orientation.w, _msgRealPose.orientation.x, _msgRealPose.orientation.y, _msgRealPose.orientation.z;
-  	_wRb = quaternionToRotationMatrix(_qcur);
+  _wRb = quaternionToRotationMatrix(_qcur);
 
 	if(!_firstRealPoseReceived)
 	{
@@ -274,19 +287,20 @@ void FootIsometricController::updateRealPose(const geometry_msgs::Pose::ConstPtr
 
 void FootIsometricController::updateFootIsometricData(const rosserial_mbed::Adc::ConstPtr& msg)
 {
-	_msgFootIsometric = *msg;
-  _msgFootIsometric.adc0= 35000-_msgFootIsometric.adc0;
-  _msgFootIsometric.adc2= 35000-_msgFootIsometric.adc2;
-  _msgFootIsometric.adc3= 35000-_msgFootIsometric.adc3;
-  _msgFootIsometric.adc4= 35000-_msgFootIsometric.adc4;
-  _msgFootIsometric.adc5= 35000-_msgFootIsometric.adc5;
-  _msgFootIsometric.adc6= 35000-_msgFootIsometric.adc6;
+  _adc(0)= 35000-float(msg->adc0);
+  _adc(1) = float(msg->adc1);
+  _adc(2)= 35000-float(msg->adc2);
+  _adc(3)= 35000-float(msg->adc3);
+  _adc(4)= 35000-float(msg->adc4);
+  _adc(5)= 35000-float(msg->adc5);
+  _adc(6)= 35000-float(msg->adc6);
 
 	if(!_firstFootIsometricReceived)
 	{
 		_firstFootIsometricReceived = true;
 	}
 }
+
 
 Eigen::Vector4f FootIsometricController::quaternionProduct(Eigen::Vector4f q1, Eigen::Vector4f q2)
 {
@@ -298,6 +312,7 @@ Eigen::Vector4f FootIsometricController::quaternionProduct(Eigen::Vector4f q1, E
 
   	return q;
 }
+
 
 Eigen::Vector4f FootIsometricController::rotationMatrixToQuaternion(Eigen::Matrix3f R)
 {
@@ -394,291 +409,12 @@ void FootIsometricController::quaternionToAxisAngle(Eigen::Vector4f q, Eigen::Ve
 }
 
 
-// void FootIsometricController::processABButtonEvent(int value, bool newEvent, int direction)
-// {
-// 	if(_modeThreeTranslation) // Control translation along z axis of world frame
-// 	{
-// 		if(!_firstButton)
-// 		{
-// 			_firstButton = true;
-// 		}
+void FootIsometricController::dynamicReconfigureCallback(foot_surgical_robot::footIsometricController_paramsConfig &config, uint32_t level)
+{
+	ROS_INFO("Reconfigure request. Updatig the parameters ...");
 
-// 		if(!newEvent) // No new event received
-// 		{
-// 			// Track desired position
-// 			_vdes = -_convergenceRate*(_pcur-_pdes);
-// 		}
-// 		else
-// 		{
-// 			if(value>0) // Button pressed
-// 			{
-// 				// Update desired z velocity and position
-// 				_count++;
-// 				if(_count>MAX_XY_REL)
-// 				{
-// 					_count = MAX_XY_REL;
-// 				}
-// 				_buttonPressed = true;
-// 				_vdes(2) = direction*_zVelocity*_count/MAX_XY_REL;
-// 				_pdes(2) = _pcur(2);
-// 			}
-// 			else // Button released
-// 			{
-// 				// Track desired position
-// 				_count = 0;
-// 				_buttonPressed = false;
-// 				_vdes(2) = -_convergenceRate*(_pcur(2)-_pdes(2));
-// 			}
-// 		}
-// 	}
-// 	else // Control translation along z axis of end effector frame
-// 	{
-// 		if(!_firstButton)
-// 		{
-// 			_firstButton = true;
-// 		}
-		
-// 		if(!newEvent) // No new event received
-// 		{
-// 				// Track desired position
-// 			_vdes = -_convergenceRate*(_pcur-_pdes);
-// 		}
-// 		else
-// 		{
-// 			// Compute desired orientation matrix from desired quaternion
-// 			_Rdes = KDL::Rotation::Quaternion(_qdes(1),_qdes(2),_qdes(3),_qdes(0));
-			
-// 			// Extract the z vector from the orientation matrix
-// 			KDL::Vector temp = _Rdes.UnitZ();
-// 			Eigen::Vector3f zAxis;
-// 			zAxis << temp.x(),temp.y(),temp.z();
-
-// 			if(value>0)
-// 			{
-// 				_count++;
-// 				if(_count>MAX_XY_REL)
-// 				{
-// 					_count = MAX_XY_REL;
-// 				}
-// 				// Update desired velocity and position
-// 				_buttonPressed = true;
-// 				_vdes = direction*_zVelocity*zAxis;
-// 				_pdes = _pcur;
-// 			}
-// 			else
-// 			{
-// 				_count = 0;
-// 				// Track desired position
-// 				_buttonPressed = false;
-// 				_vdes= -_convergenceRate*(_pcur-_pdes);
-// 			}	
-// 		}
-// 	}
-// }
-
-
-// void FootIsometricController::processCursorEvent(float relX, float relY, bool newEvent)
-// {
-// 	if(_modeThreeTranslation) // Control translations along x,x axis of world frame
-// 	{
-// 		if(!newEvent) // No new event received
-// 		{
-// 			// Track desired position
-// 			_vdes = -_convergenceRate*(_pcur-_pdes);
-// 		}
-// 		else
-// 		{
-// 			// Update desired x,y position
-// 			_pdes(0) = _pcur(0);
-// 			_pdes(1) = _pcur(1);
-
-// 			// Compute desired x, y velocities along x, y axis of world frame
-// 			if(relX>MAX_XY_REL)
-// 			{
-// 				_vdes(1) = -_linearVelocityLimit;
-// 			}
-// 			else if(relX < -MAX_XY_REL)
-// 			{
-// 				_vdes(1) = _linearVelocityLimit;
-// 			}
-// 			else
-// 			{
-// 				_vdes(1) = -_linearVelocityLimit*relX/MAX_XY_REL;
-// 			}
-
-// 			if(relY>MAX_XY_REL)
-// 			{
-// 				_vdes(0) = -_linearVelocityLimit;
-// 			}
-// 			else if(relY < -MAX_XY_REL)
-// 			{
-// 				_vdes(0) = _linearVelocityLimit;
-// 			}
-// 			else
-// 			{
-// 				_vdes(0) = -_linearVelocityLimit*relY/MAX_XY_REL;
-// 			}
-
-// 			if(!_firstButton || !_buttonPressed)
-// 			{
-// 				// If buttons not pressed track desired z position
-// 				_vdes(2) = -_convergenceRate*(_pcur(2)-_pdes(2));
-// 			}
-// 		}	
-// 	}
-// 	else // Control rotation along x, y axis of end effector frame
-// 	{
-// 		if(!newEvent) // No new event received
-// 		{
-// 			// Track desired position
-// 			_vdes = -_convergenceRate*(_pcur-_pdes);
-// 			// Track desired orientation
-// 			_qdes = _qcur;
-// 		}
-// 		else
-// 		{
-// 			// Compute desired angular velocities along x, y axis of end
-// 			// effector frame
-// 			if(relX>MAX_XY_REL)
-// 			{
-// 				_omegades(0) = _angularVelocityLimit;
-// 			}
-// 			else if(relX < -MAX_XY_REL)
-// 			{
-// 				_omegades(0) = -_angularVelocityLimit;
-// 			}
-// 			else
-// 			{
-// 				_omegades(0) = _angularVelocityLimit*relX/MAX_XY_REL;
-// 			}
-
-// 			if(relY>MAX_XY_REL)
-// 			{
-// 				_omegades(1) = _angularVelocityLimit;
-// 			}
-// 			else if(relY < -MAX_XY_REL)
-// 			{
-// 				_omegades(1) = -_angularVelocityLimit;
-// 			}
-// 			else
-// 			{
-// 				_omegades(1) = _angularVelocityLimit*relY/MAX_XY_REL;
-// 			}
-
-// 			// Set desired angular velocity along z axos to 0
-// 			_omegades(2) = 0.0f;
-
-// 			// Update desired quaternion based on desired end effector frame
-// 			// angular velocity
-// 			Eigen::Vector4f q;
-// 			q = _qdes;
-// 			Eigen:: Vector4f wq;
-// 			wq << 0, _omegades;
-// 			Eigen::Vector4f dq = quaternionProduct(q,wq);
-// 			q += 0.5f*_dt*dq;
-// 			q /= q.norm();
-// 			_qdes = q;
-
-// 			if(!_firstButton || !_buttonPressed)
-// 			{
-// 				// If buttons not pressed track desired position
-// 				_vdes = -_convergenceRate*(_pcur-_pdes);
-// 			}
-// 		}		
-// 	}
-// }
-
-// void FootIsometricController::processRightClickEvent(int value, bool newEvent)
-// {
-
-// 	if(!_firstButton)
-// 	{
-// 		_firstButton = true;
-// 	}
-
-// 	if(!newEvent) // No new event received
-// 	{
-// 		// Track desired position
-// 		_vdes = -_convergenceRate*(_pcur-_pdes);
-// 		_rightClick = false;
-// 	}
-// 	else
-// 	{
-// 		float alpha = 4.0f;
-// 		float omega = M_PI;
-// 		float r = 0.05f;
-
-// 		if(value == 1) // Button pressed
-// 		{
-// 			// Update desired z velocity and position
-// 			_buttonPressed = true;
-// 			_attractorPosition = _pcur;
-// 			_pdes = _pcur;
-// 			_vdes = -_convergenceRate*(_pcur-_attractorPosition);
-// 			_rightClick = true;
-// 		}
-// 		else if(value == 2)
-// 		{
-// 			Eigen::Vector3f x = _pcur-_attractorPosition;
-// 			float R = sqrt(x(0) * x(0) + x(1) * x(1));
-// 			float T = atan2(x(1), x(0));
-// 			float vx = -alpha*(R-r) * cos(T) - R * omega * sin(T);
-// 			float vy = -alpha*(R-r) * sin(T) + R * omega * cos(T);
-// 			float vz = -alpha*x(2);
-
-// 			_vdes << vx, vy, vz;
-
-// 			if (_vdes.norm() > 0.15f) 
-// 			{
-// 				_vdes = _vdes / _vdes.norm()*0.15f;
-// 			}
-
-// 			_rightClick = true;
-// 		}
-// 		else // Button released
-// 		{
-// 			// Track desired position
-// 			_buttonPressed = false;
-// 			_pdes = _pcur;
-// 			_vdes = -_convergenceRate*(_pcur-_pdes);
-// 			_rightClick = false;
-// 		}
-// 	}
-// }
-
-
-// void FootIsometricController::callback(foot_interfaces::footMouseController_paramsConfig &config, uint32_t level)
-// {
-// 	this->dynamicReconfigureCallback(config,level);
-// }
-
-// void FootIsometricController::dynamicReconfigureCallback(foot_interfaces::footMouseController_paramsConfig &config, uint32_t level)
-// {
-// 	ROS_INFO("Reconfigure request. Updatig the parameters ...");
-
-// 	_convergenceRate = config.convergenceRate;
-// 	_zVelocity = config.zVelocity;
-// 	_linearVelocityLimit = config.linearVelocityLimit;
-// 	_angularVelocityLimit = config.angularVelocityLimit;
-// 	_modeThreeTranslation = config.modeThreeTranslation;
-
-// 	if (_convergenceRate < 0)
-// 	{
-// 		ROS_ERROR("RECONFIGURE: The convergence rate cannot be negative!");
-// 	}
-
-// 	if (_zVelocity < 0)
-// 	{
-// 		ROS_ERROR("RECONFIGURE: The z velocity cannot be negative!");
-// 	}
-
-// 	if (_linearVelocityLimit < 0) 
-// 	{
-// 		ROS_ERROR("RECONFIGURE: The limit for linear velocity cannot be negative!");
-// 	}
-
-// 	if (_angularVelocityLimit < 0) 
-// 	{
-// 		ROS_ERROR("RECONFIGURE: The limit for angular velocity cannot be negative!");
-// 	}
-// }
+	_convergenceRate = config.convergenceRate;
+	_linearVelocityLimit = config.linearVelocityLimit;
+	_angularVelocityLimit = config.angularVelocityLimit;
+	_threeTranslationMode = config.threeTranslationMode;
+}
