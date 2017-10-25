@@ -26,6 +26,9 @@ bool FootIsometricController::init()
 	_qcur.setConstant(0.0f);
 	_qdes.setConstant(0.0f);
 	_adc.setConstant(0.0f);
+	_rcmPosition.setConstant(0.0f);
+	_vuser.setConstant(0.0f);
+	_desiredDistance = 0.0f;
 	
 	// Subscriber definitions
 	_subRealPose = _n.subscribe("/lwr/ee_pose", 1, &FootIsometricController::updateRealPose, this, ros::TransportHints().reliable().tcpNoDelay());
@@ -34,8 +37,8 @@ bool FootIsometricController::init()
 	// Publisher definitions
 	_pubDesiredTwist = _n.advertise<geometry_msgs::Twist>("/lwr/joint_controllers/passive_ds_command_vel", 1);
 	_pubDesiredOrientation = _n.advertise<geometry_msgs::Quaternion>("/lwr/joint_controllers/passive_ds_command_orient", 1);
+	_pubRCMPosition = _n.advertise<geometry_msgs::PointStamped>("/FootIsometricController/RCMPosition", 1);
 	
-
 		// Dynamic reconfigure definition
 	_dynRecCallback = boost::bind(&FootIsometricController::dynamicReconfigureCallback, this, _1, _2);
 	_dynRecServer.setCallback(_dynRecCallback);
@@ -98,129 +101,176 @@ void FootIsometricController::stopNode(int sig)
 
 void  FootIsometricController::computeCommand()
 {
-	if(_threeTranslationMode)
+	// _vdes.setConstant(0.0f);
+	if(_threeTranslationMode && !_oneTranslationMode && !_rcmMode)
 	{
-	  if(_adc(4) > ADC_THRESHOLD) // zw+
-	  {
-	 		_vdes(2) =_adc(4)*_linearVelocityLimit/MAX_ADC_VALUE; 	
-	 		_pdes(2) = _pcur(2);
-
-	 		std::cerr <<"zw+: " << _vdes(2)  << std::endl;
-		}
-		else if(_adc(2) > ADC_THRESHOLD) // zw-
-		{
-	 		_vdes(2)= -_adc(2)*_linearVelocityLimit/MAX_ADC_VALUE; 
-	 		_pdes(2) = _pcur(2);
-
-	 		std::cerr <<"zw-: " << _vdes(2)  << std::endl;
-		} 
-		else // Track desired z position
-		{
-			_vdes(2) = -_convergenceRate*(_pcur(2)-_pdes(2));
-		}
-
-	  if(_adc(0) > ADC_THRESHOLD) // yw+
-	  { 
-	 		_vdes(1)= _adc(0)*_linearVelocityLimit/MAX_ADC_VALUE; 	
-	 		_pdes(1) = _pcur(1);
-
-	 		std::cerr <<"yw+: " << _vdes(1)  << std::endl;
-		}
-		else if(_adc(5) > ADC_THRESHOLD) // yw-
-		{ 
-	 		_vdes(1)=-_adc(5)*_linearVelocityLimit/MAX_ADC_VALUE; 
-	 		_pdes(1) = _pcur(1);
-
-	 		std::cerr <<"yw-: " << _vdes(1)  << std::endl;
-		}    	
-		else // Track desired y position
-	 	{
-	  	_vdes(0) = -_convergenceRate*(_pcur(0)-_pdes(0));
-	 	}
-
-	  if(_adc(3) > ADC_THRESHOLD) // xw+
-	  { 
-	 		_vdes(0)=_adc(3)*_linearVelocityLimit/MAX_ADC_VALUE; 	
-	 		_pdes(0) = _pcur(0);
-	 		
-	 		std::cerr <<"xw+: " << _vdes(0)  << std::endl;
-		}
-		else if(_adc(6) > ADC_THRESHOLD) // xw-
-		{ 
-	 		_vdes(0)=-_adc(6)*_linearVelocityLimit/MAX_ADC_VALUE; 
-	 		_pdes(0) = _pcur(0);
-
-	 		std::cerr <<"xw-: " << _vdes(0) << std::endl;
-		}    	
-		else // Track desired x position
-	 	{
-	  	_vdes(0) = -_convergenceRate*(_pcur(0)-_pdes(0));
-	 	}
-
+		ROS_INFO_STREAM_THROTTLE(1.0f, "Three translation mode");
+		threeTranslationMode();
+	}
+	else if(!_threeTranslationMode && _oneTranslationMode && !_rcmMode)
+	{
+		ROS_INFO_STREAM_THROTTLE(1.0f, "One translation mode");		
+		oneTranslationMode();
+	}
+	else if(!_threeTranslationMode && !_oneTranslationMode && _rcmMode)
+	{
+		ROS_INFO_STREAM_THROTTLE(1.0f, "Remote center of motion mode");				
+		remoteCenterOfMotionMode();
 	}
 	else
 	{
-	  if(_adc(4) > ADC_THRESHOLD) // zb-
-	  {
-	 		_vdes = -_adc(4)*_linearVelocityLimit/MAX_ADC_VALUE*_wRb.col(2); 	
-	 		_pdes = _pcur;
-
-	 		std::cerr <<"zb+: " << _vdes.transpose()  << std::endl;
-		}
-		else if(_adc(2) > ADC_THRESHOLD) // zb+
-		{
-	 		_vdes= _adc(2)*_linearVelocityLimit/MAX_ADC_VALUE*_wRb.col(2); 
-	 		_pdes = _pcur;
-
-	 		std::cerr <<"zb-: " << _vdes.transpose()  << std::endl;
-		} 
-		else // Track desired position
-		{
-			_vdes = -_convergenceRate*(_pcur-_pdes);
-		}
-
-		_omegades.setConstant(0.0f);
-	  if(_adc(0) > ADC_THRESHOLD) // roll-
-	  { 
-	 		_omegades(0)= _adc(0)*_angularVelocityLimit/MAX_ADC_VALUE; 	
-	 		std::cerr <<"roll-: " << _omegades(0)  << std::endl;
-		}
-		else if(_adc(5) > ADC_THRESHOLD) // roll+
-		{ 
-	 		_omegades(0)= -_adc(5)*_angularVelocityLimit/MAX_ADC_VALUE; 	
-	 		std::cerr <<"roll+: " << _vdes(1)  << std::endl;
-		}    	
-		else
-	 	{
-	 		_omegades(0) = 0.0f;
-	 	}
-
-	  if(_adc(3) > ADC_THRESHOLD) // pitch+
-	  { 
-	 		_omegades(1)= -_adc(3)*_angularVelocityLimit/MAX_ADC_VALUE; 		 		
-	 		std::cerr <<"pitch+: " << _omegades(1)  << std::endl;
-		}
-		else if(_adc(6) > ADC_THRESHOLD) // pitch-
-		{ 
-	 		_omegades(1)= _adc(6)*_angularVelocityLimit/MAX_ADC_VALUE; 
-
-	 		std::cerr <<"pitch-: " << _omegades(1) << std::endl;
-		}    	
-		else
-	 	{
-	 		_omegades(1) = 0.0f;
-	 	}
-	
-		// Update desired quaternion based on desired angular velocity
-		Eigen::Vector4f q;
-		q = _qdes;
-		Eigen:: Vector4f wq;
-		wq << 0, _wRb.transpose()*_omegades;
-		Eigen::Vector4f dq = quaternionProduct(q,wq);
-		q += 0.5f*_dt*dq;
-		q /= q.norm();
-		_qdes = q;
+		ROS_INFO_STREAM_THROTTLE(1.0f, "No control mode used");				
+		_vdes.setConstant(0.0f);
+		_qdes = _qcur;
 	}
+
+	if(!_rcmMode)
+	{
+		_firstRCM = false;
+		_rcmPosition = _pcur;
+		_rcmPosition(2) -= 0.2f;
+	}
+}
+
+
+
+void FootIsometricController::threeTranslationMode()
+{
+  if(_adc(4) > ADC_THRESHOLD) // zw+
+  {
+ 		_vdes(2) =_adc(4)*_linearVelocityLimit/MAX_ADC_VALUE; 	
+ 		_pdes(2) = _pcur(2);
+
+ 		std::cerr <<"zw+: " << _vdes(2)  << std::endl;
+	}
+	else if(_adc(2) > ADC_THRESHOLD) // zw-
+	{
+ 		_vdes(2)= -_adc(2)*_linearVelocityLimit/MAX_ADC_VALUE; 
+ 		_pdes(2) = _pcur(2);
+
+ 		std::cerr <<"zw-: " << _vdes(2)  << std::endl;
+	} 
+	else // Track desired z position
+	{
+		_vdes(2) = -_convergenceRate*(_pcur(2)-_pdes(2));
+	}
+
+  if(_adc(0) > ADC_THRESHOLD) // yw+
+  { 
+ 		_vdes(1)= _adc(0)*_linearVelocityLimit/MAX_ADC_VALUE; 	
+ 		_pdes(1) = _pcur(1);
+
+ 		std::cerr <<"yw+: " << _vdes(1)  << std::endl;
+	}
+	else if(_adc(5) > ADC_THRESHOLD) // yw-
+	{ 
+ 		_vdes(1)=-_adc(5)*_linearVelocityLimit/MAX_ADC_VALUE; 
+ 		_pdes(1) = _pcur(1);
+
+ 		std::cerr <<"yw-: " << _vdes(1)  << std::endl;
+	}    	
+	else // Track desired y position
+ 	{
+  	_vdes(0) = -_convergenceRate*(_pcur(0)-_pdes(0));
+ 	}
+
+  if(_adc(3) > ADC_THRESHOLD) // xw+
+  { 
+ 		_vdes(0)=_adc(3)*_linearVelocityLimit/MAX_ADC_VALUE; 	
+ 		_pdes(0) = _pcur(0);
+ 		
+ 		std::cerr <<"xw+: " << _vdes(0)  << std::endl;
+	}
+	else if(_adc(6) > ADC_THRESHOLD) // xw-
+	{ 
+ 		_vdes(0)=-_adc(6)*_linearVelocityLimit/MAX_ADC_VALUE; 
+ 		_pdes(0) = _pcur(0);
+
+ 		std::cerr <<"xw-: " << _vdes(0) << std::endl;
+	}    	
+	else // Track desired x position
+ 	{
+  	_vdes(0) = -_convergenceRate*(_pcur(0)-_pdes(0));
+ 	}
+
+ 	// Virtual walls
+ 	if((_pcur(1) < -0.4f && _vdes(1) < 0.0f) || (_pcur(1) > 0.4f && _vdes(1) > 0.0f))
+ 	{
+ 		_vdes(1) = 0.0f;
+ 	}
+ 	if((_pcur(0) < -0.6f && _vdes(0) < 0.0f) || (_pcur(0) > 0.0f && _vdes(0) > 0.0f))
+ 	{
+ 		_vdes(0) = 0.0f;
+ 	}
+ 	if((_pcur(2) < 0.35 && _vdes(2) < 0.0f) || (_pcur(2) > 0.7f && _vdes(2) > 0.0f))
+ 	{
+ 		_vdes(2) = 0.0f;
+ 	}
+}
+
+void FootIsometricController::oneTranslationMode()
+{
+ 	
+ 	if(_adc(4) > ADC_THRESHOLD) // zb-
+  {
+ 		_vdes = -_adc(4)*_linearVelocityLimit/MAX_ADC_VALUE*_wRb.col(2); 	
+ 		_pdes = _pcur;
+
+ 		std::cerr <<"zb+: " << _vdes.transpose()  << std::endl;
+	}
+	else if(_adc(2) > ADC_THRESHOLD) // zb+
+	{
+ 		_vdes= _adc(2)*_linearVelocityLimit/MAX_ADC_VALUE*_wRb.col(2); 
+ 		_pdes = _pcur;
+
+ 		std::cerr <<"zb-: " << _vdes.transpose()  << std::endl;
+	} 
+	else // Track desired position
+	{
+		_vdes = -_convergenceRate*(_pcur-_pdes);
+	}
+
+	_omegades.setConstant(0.0f);
+  if(_adc(0) > ADC_THRESHOLD) // roll-
+  { 
+ 		_omegades(0)= _adc(0)*_angularVelocityLimit/MAX_ADC_VALUE; 	
+ 		std::cerr <<"roll-: " << _omegades(0)  << std::endl;
+	}
+	else if(_adc(5) > ADC_THRESHOLD) // roll+
+	{ 
+ 		_omegades(0)= -_adc(5)*_angularVelocityLimit/MAX_ADC_VALUE; 	
+ 		std::cerr <<"roll+: " << _vdes(1)  << std::endl;
+	}    	
+	else
+ 	{
+ 		_omegades(0) = 0.0f;
+ 	}
+
+  if(_adc(3) > ADC_THRESHOLD) // pitch+
+  { 
+ 		_omegades(1)= -_adc(3)*_angularVelocityLimit/MAX_ADC_VALUE; 		 		
+ 		std::cerr <<"pitch+: " << _omegades(1)  << std::endl;
+	}
+	else if(_adc(6) > ADC_THRESHOLD) // pitch-
+	{ 
+ 		_omegades(1)= _adc(6)*_angularVelocityLimit/MAX_ADC_VALUE; 
+
+ 		std::cerr <<"pitch-: " << _omegades(1) << std::endl;
+	}    	
+	else
+ 	{
+ 		_omegades(1) = 0.0f;
+ 	}
+
+	// Update desired quaternion based on desired angular velocity
+	Eigen::Vector4f q;
+	q = _qdes;
+	Eigen:: Vector4f wq;
+	wq << 0, _wRb.transpose()*_omegades;
+	Eigen::Vector4f dq = quaternionProduct(q,wq);
+	q += 0.5f*_dt*dq;
+	q /= q.norm();
+	_qdes = q;
 
  	// Virtual walls
  	if((_pcur(1) < -0.4f && _vdes(1) < 0.0f) || (_pcur(1) > 0.4f && _vdes(1) > 0.0f))
@@ -236,6 +286,161 @@ void  FootIsometricController::computeCommand()
  		_vdes(2) = 0.0f;
  	}
 
+}
+
+void FootIsometricController::remoteCenterOfMotionMode()
+{
+
+	// Based on the kinematics of an image point under spherical projection
+	// The primary task is automaic alignment of the RCM point direction with
+	// the direction of the end effector
+
+	// The secondary tasks are controlled by the user in the nullspace of the
+	// primary task: rotations over the sphere centered at the RCM point +
+	// insertion/withdraw of the end effector along the RCM direction 
+
+	Eigen::Vector3f direction;
+
+	// Compute direction to remote center of motion (RCM) point in end effector frame
+  direction = _wRb.transpose()*(_rcmPosition-_pcur);
+  
+	// Compute distance to RCM point
+  float distance = direction.norm();
+
+  if(distance < _rcmMinimumDistance && _vuser(2)>0)
+  {
+  	_vdes = (_pdes-_pcur);
+  	// _vdes.se
+  }
+  else
+  {
+
+  	if(!_firstRCM)
+  	{
+  		_desiredDistance = distance;
+  		_firstRCM = true;
+  	}
+	  // Normalized direction
+	  direction /= direction.norm();
+
+	  // Compute orthogonal projector onto the tangent space of "direction"
+	  Eigen::Matrix3f orthogonalProjector = Eigen::Matrix3f::Identity()-direction*direction.transpose();
+	  
+	  // Compute skew symmetric matrix associated to "direction"
+	  Eigen::Matrix3f S;
+	  S << 0.0f, -direction(2), direction(1),
+	       direction(2), 0.0f, -direction(0),
+	       -direction(1), direction(0), 0.0f;
+	 
+	  // Compute interaction matrix 
+	  Eigen::Matrix<float,3,6> L;
+	  L.block(0,0,3,3) = -orthogonalProjector/distance;
+	  L.block(0,3,3,3) = S;
+
+	  // Compute the pseudo inverse of the interaction matrix using SVD decomposition
+	  Eigen::Matrix<float,6,3> W;
+	  W.setConstant(0.0f);
+	  Eigen::JacobiSVD<Eigen::MatrixXf> svd;
+	  Eigen::MatrixXf singularValues;
+	  svd = Eigen::JacobiSVD<Eigen::MatrixXf>(L, Eigen::ComputeFullU | Eigen::ComputeFullV);
+	  singularValues = svd.singularValues();
+
+	  float tolerance = 1e-6f*std::max(L.rows(),L.cols())*singularValues.array().abs().maxCoeff();
+
+	  for(int m = 0; m < std::min(W.rows(),W.cols()); m++)
+	  {
+	    if(singularValues(m,0)>tolerance)
+	    {
+	      W(m,m) = 1.0f/singularValues(m,0);
+	    }
+	    else
+	    {
+	      W(m,m) = 0.0f;
+	    }
+	  }
+	  Eigen::Matrix<float,6,3> Linv;
+	  Linv = svd.matrixV()*W*svd.matrixU().adjoint();
+
+	  // The desired direction in the end effector frame is simply 0,0,1
+	  Eigen::Vector3f sd;
+	  sd << 0.0f,0.0f,1.0f;
+
+	  Eigen::Matrix<float,6,1> desiredTwist;
+	  Eigen::Matrix<float,6,1> gains;
+
+	  gains << _rcmLinearVelocityGain*Eigen::Vector3f::Ones(), _rcmAngularVelocityGain*Eigen::Vector3f::Ones();
+	  // gains << _linearSpeedGain*Eigen::Vector3f::Ones(), _angularSpeedGain*Eigen::Vector3f::Ones();
+
+	  ////////////////
+	  // Contol law //
+	  ////////////////
+
+	  // Primaty task
+	  desiredTwist = gains.cwiseProduct(Linv*(sd-direction));
+
+	  // Compute nullspace basis
+	  Eigen::Vector3f ex, ey;
+	  ex << 1.0f, 0.0f, 0.0f;
+	  ey << 0.0f, 1.0f, 0.0f;
+
+	  ex = -_wRb.transpose()*ex;
+	  ey = -_wRb.transpose()*ey;
+
+	  Eigen::Matrix<float, 6,1> n1,n2,n3,n4;
+	  n1.setConstant(0.0f);
+	  n2.setConstant(0.0f);
+	  n3.setConstant(0.0f);
+	  n4.setConstant(0.0f);
+
+	  n1.segment(0,3) = direction;
+	  n2.segment(3,3) = direction;
+	  n3.segment(0,3) = -S*ey;
+	  n3.segment(3,3) = -orthogonalProjector*ey/distance;
+	  n4.segment(0,3) = S*ex;
+	  n4.segment(3,3) = orthogonalProjector*ex/distance;
+
+	  // Secondary tasks	
+	  // desiredTwist.setConstant(0.0f);
+	  // desiredTwist.segment(0,3).setConstant(0.0f);
+
+	  if(fabs(_vuser(2)) > 1e-3)
+	  {
+	  	_desiredDistance = distance;
+	  }
+	  // if(distance<0.1 )
+	  // {
+	  // 	_desiredDistance = 0.1f;
+	  // }
+	  
+	  desiredTwist += (_vuser(2)-_rcmDistanceGain*(_desiredDistance-distance))*n1+_vuser(0)*n3+_vuser(1)*n4;
+	  _vdes = _wRb*desiredTwist.segment(0,3);
+	  _omegades = _wRb*(desiredTwist.segment(3,3));
+	  
+	  if (_vdes.norm() > _linearVelocityLimit) 
+	  {
+	    _vdes = _linearVelocityLimit*_vdes/_vdes.norm();
+	  }
+
+	  if (_omegades.norm() > _angularVelocityLimit) 
+	  {
+	    _omegades = _angularVelocityLimit*_omegades/_omegades.norm();
+	  }
+
+	  Eigen::Vector4f q;
+	  q = _qdes;
+	  Eigen:: Vector4f wq;
+	  wq << 0, _wRb.transpose()*_omegades;
+	  Eigen::Vector4f dq = quaternionProduct(q,wq);
+	  q += 0.5f*_dt*dq;
+	  q /= q.norm();
+	  _qdes = q;
+	  // _qdes = _qcur;
+
+	  _pdes = _pcur;
+  }
+      
+	std::cerr << "distance: " << distance << " vu: " << _vuser.transpose() << " vdes: " << _vdes.transpose() << std::endl;
+	std::cerr << "desired distance: " << _desiredDistance << " u: " << -10.0f*(_desiredDistance-distance) << std::endl;
 }
 
 
@@ -261,6 +466,14 @@ void FootIsometricController::publishData()
 
 	_pubDesiredOrientation.publish(_msgDesiredOrientation);
 
+	_msgRCMPosition.header.frame_id = "world";
+  _msgRCMPosition.header.stamp = ros::Time::now();
+  _msgRCMPosition.point.x = _rcmPosition(0);
+  _msgRCMPosition.point.y = _rcmPosition(1);
+  _msgRCMPosition.point.z = _rcmPosition(2);
+
+  _pubRCMPosition.publish(_msgRCMPosition);
+
 
 	_mutex.unlock();
 }
@@ -281,6 +494,8 @@ void FootIsometricController::updateRealPose(const geometry_msgs::Pose::ConstPtr
 		_pdes = _pcur;
 		_qdes = _qcur;
 		_vdes.setConstant(0.0f);
+		_rcmPosition = _pcur;
+		_rcmPosition(2) -= 0.2f;
 	}
 }
 
@@ -294,6 +509,35 @@ void FootIsometricController::updateFootIsometricData(const rosserial_mbed::Adc:
   _adc(4)= 35000-float(msg->adc4);
   _adc(5)= 35000-float(msg->adc5);
   _adc(6)= 35000-float(msg->adc6);
+
+  _vuser.setConstant(0.0f);
+  
+  if(_adc(4) > ADC_THRESHOLD)
+  {
+ 		_vuser(2) =_adc(4)*_linearVelocityLimit/MAX_ADC_VALUE; 	
+	}
+	else if(_adc(2) > ADC_THRESHOLD)
+	{
+ 		_vuser(2)= -_adc(2)*_linearVelocityLimit/MAX_ADC_VALUE; 
+	} 
+
+  if(_adc(0) > ADC_THRESHOLD)
+  { 
+ 		_vuser(1)= _adc(0)*_linearVelocityLimit/MAX_ADC_VALUE; 	
+	}
+	else if(_adc(5) > ADC_THRESHOLD)
+	{ 
+ 		_vuser(1)=-_adc(5)*_linearVelocityLimit/MAX_ADC_VALUE; 
+	}    	
+
+  if(_adc(3) > ADC_THRESHOLD)
+  { 
+ 		_vuser(0)=_adc(3)*_linearVelocityLimit/MAX_ADC_VALUE; 	
+	}
+	else if(_adc(6) > ADC_THRESHOLD)
+	{ 
+ 		_vuser(0)=-_adc(6)*_linearVelocityLimit/MAX_ADC_VALUE; 
+	}  
 
 	if(!_firstFootIsometricReceived)
 	{
@@ -417,4 +661,10 @@ void FootIsometricController::dynamicReconfigureCallback(foot_surgical_robot::fo
 	_linearVelocityLimit = config.linearVelocityLimit;
 	_angularVelocityLimit = config.angularVelocityLimit;
 	_threeTranslationMode = config.threeTranslationMode;
+	_oneTranslationMode = config.oneTranslationMode;
+	_rcmMode = config.rcmMode;
+	_rcmLinearVelocityGain = config.rcmLinearVelocityGain;
+	_rcmAngularVelocityGain = config.rcmAngularVelocityGain;
+	_rcmDistanceGain = config.rcmDistanceGain;
+	_rcmMinimumDistance = config.rcmMinimumDistance;
 }
